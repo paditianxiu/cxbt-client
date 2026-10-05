@@ -10,6 +10,7 @@ import { createBattleAvatar, type BattleAvatar } from './avatar';
 import { createBattleAudio } from './audio';
 import { createProjectileSystem, weaponKind } from './projectiles';
 import './Gameplay.css';
+import { WebRTCClient } from '../../network/WebRTCClient';
 
 type MapDefinition = {
   scene: string;
@@ -563,7 +564,8 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
   const [remaining, setRemaining] = useState(ROUND_LENGTH);
   const [scoreRed, setScoreRed] = useState(0);
   const [scoreBlue, setScoreBlue] = useState(0);
-  const wsRef = useRef<WebSocket | null>(null);
+  const wsRef = useRef<WebRTCClient | null>(null);
+  const sequenceRef = useRef(0);
   const myUserId = useMemo(() => {
     const me = Object.values(room.players || {}).find((p: any) => p.username === character.name);
     return me ? (me as any).userId : 0;
@@ -601,12 +603,17 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
   }, [paused]);
 
   useEffect(() => {
-    const ws = new WebSocket(`${WS_BASE}?roomId=${room.id}&playerId=${myUserId}`);
+    const gameUrl = `${WS_BASE}?roomId=${room.id}&playerId=${myUserId}`;
+    const sigUrl = `${WS_BASE.replace('/ws', '/webrtc')}?roomId=${room.id}&playerId=${myUserId}`;
+    const ws = new WebRTCClient(gameUrl, sigUrl, () => {
+      console.log('WebRTC Ready! Sending first sync.');
+      sequenceRef.current++;
+      ws.sendMove(myUserId, position.x, position.z, position.yaw, sequenceRef.current);
+    });
     wsRef.current = ws;
 
-    ws.onmessage = (e) => {
+    ws.onMessage = (msg) => {
       try {
-        const msg = JSON.parse(e.data);
         if (msg.type === 'tick') {
           setRemaining(msg.time_left);
           setScoreRed(msg.score_red);
@@ -629,22 +636,13 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
       } catch (err) {}
     };
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'sync', userId: myUserId, x: position.x, z: position.z, yaw: position.yaw }));
-    };
-
     return () => {
       ws.close();
       wsRef.current = null;
     };
   }, [room.id, myUserId]);
 
-  useEffect(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'sync', userId: myUserId, x: position.x, z: position.z, yaw: position.yaw }));
-    }
-  }, [position, myUserId]);
-
+  // Removed network sync useEffect that was hooked to React state, which was causing severe lag.
   useEffect(() => {
     const controller = new AbortController();
     fetch(`${BASE}maps.json`, { signal: controller.signal }).then((response) => {
@@ -700,7 +698,14 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
     setReserves(reservesRef.current);
   };
   const reportPosition = (x: number, z: number, yaw: number) => {
-    setPosition((previous) => Math.abs(previous.x - x) + Math.abs(previous.z - z) + Math.abs(previous.yaw - yaw) > 0.06
+    // DIRECT NETWORK SEND: completely bypass React state to avoid lag spikes
+    if (wsRef.current) {
+      sequenceRef.current++;
+      wsRef.current.sendMove(myUserId, x, z, yaw, sequenceRef.current);
+    }
+    
+    // Throttle React state updates severely to just support the minimap
+    setPosition((previous) => Math.abs(previous.x - x) + Math.abs(previous.z - z) + Math.abs(previous.yaw - yaw) > 2.0
       ? { x, z, yaw } : previous);
   };
   const bounds = chosenMap?.bounds;
@@ -714,15 +719,8 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
       roomPlayers={room.players}
       onShot={onShot} 
       onHit={(targetId, damage) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          // targetId in backend ws.go HandleHit is expected to be an integer (the user id in database).
-          // Wait! In ws.go it does fmt.Sscanf(attackerID, "%d", &attID) and expects targetId to be float64 in JSON which is then cast to uint.
-          // Wait! I need to ensure targetId is passed properly!
-          // Actually, let's just pass the raw targetId and let backend parse it, BUT wait!
-          // HandleHit expects uint! Our client character.name is a string!
-          // I will check how ws.go expects it. Let's just send targetId as a number if possible, or string.
-          // Let's check backend ws.go.
-          wsRef.current.send(JSON.stringify({ type: 'hit', targetId: targetId, damage }));
+        if (wsRef.current) {
+          wsRef.current.sendJSON({ type: 'hit', targetId: targetId, damage });
         }
       }}
       onReload={onReload} onWeaponChange={(index) => { selectedRef.current = index; setSelected(index); }}
