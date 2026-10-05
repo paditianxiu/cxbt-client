@@ -2,7 +2,9 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import './App.css'
 import CharacterCreation from './features/characterCreation/CharacterCreation'
 import Lobby from './features/lobby/Lobby'
-import { readCharacter } from './features/characterCreation/character'
+import { readCharacter, fetchCharacterFromServer } from './features/characterCreation/character'
+import AuthOverlay from './features/auth/AuthOverlay'
+import { getToken } from './api'
 import CharacterPreview from './features/characterCreation/CharacterPreview'
 import { initialAppearance, loadCreationAssets, type CreationAssets, type CreationJob, type CreationWeapon } from './features/characterCreation/assets'
 
@@ -106,8 +108,20 @@ function App() {
   const [started, setStarted] = useState(() => location.pathname.endsWith('/create-character') || new URLSearchParams(window.location.search).get('screen') === 'creation')
   const [inLobby, setInLobby] = useState(() => location.pathname.endsWith('/lobby'))
   const [character, setCharacter] = useState(readCharacter)
+  const [isAuth, setIsAuth] = useState(!!getToken())
   const musicRef = useRef<HTMLAudioElement>(null)
   const hero = heroes.find((item) => item.id === selectedId) ?? heroes[0]
+
+  useEffect(() => {
+    if (isAuth) {
+      fetchCharacterFromServer().then(char => {
+        if (char) {
+          setCharacter(char);
+          setInLobby(true); // Auto enter lobby if has character
+        }
+      });
+    }
+  }, [isAuth])
 
   useEffect(() => {
     const resize = () => setScale(Math.min(innerWidth / 1440, innerHeight / 900))
@@ -136,6 +150,10 @@ function App() {
 
   const startMusic = () => {
     void musicRef.current?.play().catch(() => undefined)
+  }
+
+  if (!isAuth) {
+    return <AuthOverlay onLogin={() => setIsAuth(true)} />
   }
 
   if (inLobby && character) return <Lobby character={character} onExit={() => {

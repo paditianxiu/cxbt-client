@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import CharacterPreview from './CharacterPreview';
 import { assetUrl, CREATION_JOBS, initialAppearance, loadCreationAssets, type Appearance, type CreationAssets, type CreationJob } from './assets';
 import './CharacterCreation.css';
-import { CHARACTER_KEY, type SavedCharacter } from './character';
+import { CHARACTER_KEY, type SavedCharacter, saveCharacter } from './character';
 
 const INITIAL_APPEARANCE: Appearance = { gender: 0, hair: 1, eyes: 0, mouth: 0, accessory: 3 };
 const PARTS = [
@@ -80,7 +80,7 @@ export default function CharacterCreation({ jobId = 'assassin', onBack, onComple
     return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
   }, [settings]);
 
-  const finish = (event: React.FormEvent) => {
+  const finish = async (event: React.FormEvent) => {
     event.preventDefault();
     if (settings) return;
     const clean = name.trim();
@@ -90,12 +90,10 @@ export default function CharacterCreation({ jobId = 'assassin', onBack, onComple
       return;
     }
     try {
-      // The original player_create RPC is unavailable in the offline client.
-      const character: SavedCharacter = { version: 1, name: clean, jobId, appearance };
-      localStorage.setItem(CHARACTER_KEY, JSON.stringify(character));
+      const character = await saveCharacter(clean, jobId, appearance);
       onComplete(character);
-    } catch {
-      setNameError('角色保存失败，请检查浏览器存储空间');
+    } catch (e: any) {
+      setNameError(e.message || '角色保存失败');
     }
   };
 

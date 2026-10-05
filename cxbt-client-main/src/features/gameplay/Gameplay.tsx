@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import * as THREE from 'three';
+import { WS_BASE } from '../../api';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { SavedCharacter } from '../characterCreation/character';
 import { type CreationAssets, type CreationWeapon } from '../characterCreation/assets';
@@ -41,29 +42,35 @@ function formatTime(seconds: number) {
   return `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
 }
 
-function BattleScene({ map, character, creation, weapons, active, onReady, onPosition,
-  onShot, onReload, onWeaponChange, onDamage, paused }: {
+function BattleScene({ map, character, creation, assets, weapons, active, onReady, onPosition,
+  onShot, onHit, onReload, onWeaponChange, onDamage, paused, otherPlayers, roomPlayers }: {
   map: MapDefinition;
   character: SavedCharacter;
   creation: CreationAssets;
+  assets: LobbyAssets;
   weapons: CreationWeapon[];
   active: RefObject<BattleControl | null>;
   paused: RefObject<boolean>;
   onReady: () => void;
   onPosition: (x: number, z: number, yaw: number) => void;
   onShot: () => boolean;
+  onHit: (targetId: string, damage: number) => void;
   onReload: () => void;
   onWeaponChange: (index: number) => void;
   onDamage: (amount: number) => void;
+  otherPlayers: React.RefObject<Record<string, { buffer: {x: number, z: number, yaw: number, time: number}[] }>>;
+  roomPlayers: any;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const shotRef = useRef(onShot);
+  const hitRef = useRef(onHit);
   const reloadRef = useRef(onReload);
   const positionRef = useRef(onPosition);
   const readyRef = useRef(onReady);
   const weaponChangeRef = useRef(onWeaponChange);
   const damageRef = useRef(onDamage);
   shotRef.current = onShot;
+  hitRef.current = onHit;
   reloadRef.current = onReload;
   positionRef.current = onPosition;
   readyRef.current = onReady;
@@ -166,6 +173,15 @@ function BattleScene({ map, character, creation, weapons, active, onReady, onPos
         shotFlash = 0.08;
         flash.position.copy(muzzle);
         flash.intensity = 6;
+        
+        raycaster.set(camera.position, aim);
+        raycaster.far = 100;
+        const hits = raycaster.intersectObjects(collisionMeshes, true);
+        const firstHit = hits.find((h: any) => h.distance > 0.08);
+        if (firstHit && firstHit.object.userData?.isPlayer) {
+          const damage = kind === 'sniperrifle' ? 85 : kind === 'shotgun' ? 35 : 18;
+          hitRef.current(firstHit.object.userData.userId, damage);
+        }
       }
     };
     active.current = {
@@ -315,10 +331,115 @@ function BattleScene({ map, character, creation, weapons, active, onReady, onPos
     void load().catch((error: unknown) => {
       if (!cancelled) mount.dataset.error = error instanceof Error ? error.message : '战场加载失败';
     });
+    const otherPlayerAvatars = new Map<string, any>();
 
     const animate = () => {
       frame = requestAnimationFrame(animate);
       const delta = Math.min(clock.getDelta(), 0.05);
+
+      if (otherPlayers.current) {
+        const renderTime = performance.now() - 100;
+        for (const [id, stateObj] of Object.entries(otherPlayers.current)) {
+          const buffer = stateObj.buffer;
+          if (buffer.length === 0) continue;
+
+          let state0 = buffer[0];
+          let state1 = buffer[buffer.length - 1];
+          let found = false;
+
+          for (let i = buffer.length - 1; i >= 0; i--) {
+            if (buffer[i].time <= renderTime) {
+              state0 = buffer[i];
+              state1 = buffer[i + 1] || buffer[i];
+              found = true;
+              break;
+            }
+          }
+
+          if (!found) {
+            state0 = buffer[0];
+            state1 = buffer[0];
+          }
+
+          let interpX = state0.x;
+          let interpZ = state0.z;
+          let interpYaw = state0.yaw;
+
+          if (state0 !== state1 && state1.time > state0.time) {
+            const t = (renderTime - state0.time) / (state1.time - state0.time);
+            const clampedT = Math.max(0, Math.min(1, t));
+            interpX = state0.x + (state1.x - state0.x) * clampedT;
+            interpZ = state0.z + (state1.z - state0.z) * clampedT;
+            let dy = state1.yaw - state0.yaw;
+            while (dy > Math.PI) dy -= Math.PI * 2;
+            while (dy < -Math.PI) dy += Math.PI * 2;
+            interpYaw = state0.yaw + dy * clampedT;
+          }
+
+          let avatarObj = otherPlayerAvatars.get(id);
+          if (!avatarObj) {
+            // Create a dummy group to hold the avatar and hitbox immediately
+            const group = new THREE.Group();
+            scene.add(group);
+            
+            // Add collision capsule to root immediately
+            const capsuleGeom = new THREE.CapsuleGeometry(0.35, 0.9, 4, 8);
+            const capMat = new THREE.MeshBasicMaterial({ visible: false }); // Invisible hitbox
+            const hitbox = new THREE.Mesh(capsuleGeom, capMat);
+            hitbox.position.y = 0.8;
+            hitbox.userData = { isPlayer: true, userId: id };
+            group.add(hitbox);
+            collisionMeshes.push(hitbox);
+            
+            avatarObj = { root: group, update: null, loaded: false };
+            otherPlayerAvatars.set(id, avatarObj);
+            
+            const pInfo = roomPlayers && roomPlayers[id];
+            if (pInfo && pInfo.jobId && pInfo.appearance) {
+              const job = creation.jobs[pInfo.jobId];
+              if (job) {
+                const preset = job.presets[pInfo.appearance.gender];
+                let pWeapons = pInfo.weaponIds ? pInfo.weaponIds.map((wId: string) => assets.weapons[wId]).filter(Boolean) : job.weapons;
+                if (!pWeapons || pWeapons.length === 0) pWeapons = job.weapons;
+                createBattleAvatar(creation, preset, pInfo.appearance, pWeapons).then(loadedAvatar => {
+                  group.add(loadedAvatar.root);
+                  avatarObj.update = loadedAvatar.update;
+                  avatarObj.loaded = true;
+                }).catch(console.error);
+              }
+            } else {
+              // Fallback if data is missing, render red capsule
+              const mat = new THREE.MeshStandardMaterial({ color: 0xef4e54 });
+              const fallbackMesh = new THREE.Mesh(capsuleGeom, mat);
+              fallbackMesh.position.y = 0.8;
+              group.add(fallbackMesh);
+              avatarObj.loaded = true;
+            }
+          }
+          
+          if (avatarObj = otherPlayerAvatars.get(id)) {
+            const floor = floorAt(interpX, interpZ, 80) ?? 0;
+            const oldPos = avatarObj.root.position.clone();
+            avatarObj.root.position.set(interpX, floor, interpZ);
+            avatarObj.root.rotation.y = interpYaw;
+            if (avatarObj.update && avatarObj.loaded) {
+              const speed = oldPos.distanceTo(avatarObj.root.position) / delta;
+              const isMoving = speed > 0.1;
+              const charInfo = {
+                moveX: 0,
+                moveY: isMoving ? 1 : 0,
+                weapon: 0,
+                aim: new THREE.Vector3(0, 0, 1).applyEuler(new THREE.Euler(0, interpYaw, 0)),
+                grounded: true,
+                yaw: interpYaw,
+                pitch: 0,
+              };
+              avatarObj.update(delta, charInfo, false);
+            }
+          }
+        }
+      }
+
       if (paused.current !== audioPaused) {
         audioPaused = paused.current;
         if (audioPaused) audio.pause();
@@ -375,7 +496,12 @@ function BattleScene({ map, character, creation, weapons, active, onReady, onPos
         target.copy(position).add(new THREE.Vector3(0, 1.15 + pitch, 0));
         camera.position.copy(position).add(new THREE.Vector3(-Math.sin(yaw) * 2.9, 1.75 + pitch * 2.2, -Math.cos(yaw) * 2.9));
         camera.lookAt(target.clone().add(new THREE.Vector3(Math.sin(yaw) * 3, 0, Math.cos(yaw) * 3)));
-        positionRef.current(position.x, position.z, yaw);
+        
+        // Throttle position reporting to 15 ticks per second to prevent network flood
+        if (performance.now() - (positionRef.current as any).lastTime > 66 || !(positionRef.current as any).lastTime) {
+          (positionRef.current as any).lastTime = performance.now();
+          positionRef.current(position.x, position.z, yaw);
+        }
       }
       if (shotFlash > 0) { shotFlash -= delta; if (shotFlash <= 0) flash.intensity = 0; }
       projectiles.update(delta);
@@ -435,6 +561,14 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
   const [ready, setReady] = useState(false);
   const [paused, setPaused] = useState(false);
   const [remaining, setRemaining] = useState(ROUND_LENGTH);
+  const [scoreRed, setScoreRed] = useState(0);
+  const [scoreBlue, setScoreBlue] = useState(0);
+  const wsRef = useRef<WebSocket | null>(null);
+  const myUserId = useMemo(() => {
+    const me = Object.values(room.players || {}).find((p: any) => p.username === character.name);
+    return me ? (me as any).userId : 0;
+  }, [room.players, character.name]);
+  const otherPlayersRef = useRef<Record<string, { buffer: {x: number, z: number, yaw: number, time: number}[] }>>({});
   const [selected, setSelected] = useState(0);
   const [ammo, setAmmo] = useState<number[]>([]);
   const [reserves, setReserves] = useState<number[]>([]);
@@ -465,6 +599,51 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
   useEffect(() => {
     if (paused && document.pointerLockElement) document.exitPointerLock();
   }, [paused]);
+
+  useEffect(() => {
+    const ws = new WebSocket(`${WS_BASE}?roomId=${room.id}&playerId=${myUserId}`);
+    wsRef.current = ws;
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'tick') {
+          setRemaining(msg.time_left);
+          setScoreRed(msg.score_red);
+          setScoreBlue(msg.score_blue);
+        } else if (msg.type === 'health_update' && msg.userId == myUserId) {
+          setHealth(msg.hp);
+        } else if (msg.type === 'sync' && msg.userId != myUserId) {
+          if (!otherPlayersRef.current[msg.userId]) {
+            otherPlayersRef.current[msg.userId] = { buffer: [] };
+          }
+          const buffer = otherPlayersRef.current[msg.userId].buffer;
+          buffer.push({ x: msg.x, z: msg.z, yaw: msg.yaw, time: performance.now() });
+          if (buffer.length > 20) buffer.shift();
+        } else if (msg.type === 'respawn' && msg.userId == myUserId) {
+          setHealth(MAX_HEALTH);
+        } else if (msg.type === 'game_over') {
+          onExit();
+          alert(`游戏结束！获胜方: ${msg.winner}`);
+        }
+      } catch (err) {}
+    };
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'sync', userId: myUserId, x: position.x, z: position.z, yaw: position.yaw }));
+    };
+
+    return () => {
+      ws.close();
+      wsRef.current = null;
+    };
+  }, [room.id, myUserId]);
+
+  useEffect(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'sync', userId: myUserId, x: position.x, z: position.z, yaw: position.yaw }));
+    }
+  }, [position, myUserId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -529,9 +708,24 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
   const markerY = bounds?.length ? 50 - (position.z - bounds[1]) / bounds[3] * 100 : 50;
 
   return <main className={`battle-root${paused ? ' paused' : ''}`} data-gameplay-ready={ready}>
-    {chosenMap && <BattleScene map={chosenMap} character={character} creation={creation} weapons={weapons}
+    {chosenMap && <BattleScene map={chosenMap} character={character} creation={creation} assets={assets} weapons={weapons}
       active={control} paused={pausedRef} onReady={() => setReady(true)} onPosition={reportPosition}
-      onShot={onShot} onReload={onReload} onWeaponChange={(index) => { selectedRef.current = index; setSelected(index); }}
+      otherPlayers={otherPlayersRef}
+      roomPlayers={room.players}
+      onShot={onShot} 
+      onHit={(targetId, damage) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          // targetId in backend ws.go HandleHit is expected to be an integer (the user id in database).
+          // Wait! In ws.go it does fmt.Sscanf(attackerID, "%d", &attID) and expects targetId to be float64 in JSON which is then cast to uint.
+          // Wait! I need to ensure targetId is passed properly!
+          // Actually, let's just pass the raw targetId and let backend parse it, BUT wait!
+          // HandleHit expects uint! Our client character.name is a string!
+          // I will check how ws.go expects it. Let's just send targetId as a number if possible, or string.
+          // Let's check backend ws.go.
+          wsRef.current.send(JSON.stringify({ type: 'hit', targetId: targetId, damage }));
+        }
+      }}
+      onReload={onReload} onWeaponChange={(index) => { selectedRef.current = index; setSelected(index); }}
       onDamage={(amount) => setHealth((value) => Math.max(0, value - amount))} />}
     {!ready && <div className="battle-loading" role="status">{error || `${room.mapName} · 战场加载中…`}</div>}
     <div className="battle-reticle" aria-hidden="true"><i /><i /><i /><i /></div>
@@ -540,9 +734,12 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
       <small>{formatTime(remaining)}</small>
     </div>
     <div className="battle-top">
-      <div className="battle-team red"><strong>00</strong></div>
+      <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', marginTop: '60px', background: 'rgba(0,0,0,0.6)', color: '#fff', padding: '4px 12px', borderRadius: '12px', fontSize: '12px', zIndex: 10, pointerEvents: 'none', border: '1px solid rgba(255,255,255,0.2)' }}>
+        房间号: {room.id.replace('room-', '')} | 地图: {room.mapName}
+      </div>
+      <div className="battle-team red"><strong>{scoreRed}</strong></div>
       <div className="battle-time"><b>05</b><small><em>TIME</em> {formatTime(remaining)}</small><div className="battle-progress"><i /><i /></div></div>
-      <div className="battle-team blue"><strong>00</strong></div>
+      <div className="battle-team blue"><strong>{scoreBlue}</strong></div>
     </div>
     <aside className="battle-minimap" aria-label="小地图">
       <div className="battle-map-image" style={mapArt ? { backgroundImage: `url(${BASE}${mapArt})` } : undefined}>

@@ -7,6 +7,7 @@ import PracticeRoom from '../gameMode/PracticeRoom';
 import type { RoomConfig } from '../gameMode/CreateRoomDialog';
 import Gameplay from '../gameplay/Gameplay';
 import { loadLobbyAssets, lobbyUrl, type InventoryCategory, type InventoryItem, type LobbyAssets } from './assets';
+import GlobalChat from './GlobalChat';
 import './Lobby.css';
 
 const PAGE_SIZE = 24;
@@ -58,6 +59,7 @@ export default function Lobby({ character, onExit }: { character: SavedCharacter
   const [gameModeLobby, setGameModeLobby] = useState(false);
   const [practiceRoom, setPracticeRoom] = useState(false);
   const [battleRoom, setBattleRoom] = useState<RoomConfig>();
+  const [globalChatOpen, setGlobalChatOpen] = useState(false);
   const [quickbar, setQuickbar] = useState<(string | null)[]>([]);
   const [status, setStatus] = useState('');
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -216,7 +218,7 @@ export default function Lobby({ character, onExit }: { character: SavedCharacter
         }}>开始<br />游戏</button>
       </header>
       {practiceRoom ? <PracticeRoom assets={assets} hostName={character.name} hostIcon={assetUrl(creation.jobs[character.jobId].icon)}
-        onBack={() => { setPracticeRoom(false); setGameModeLobby(true); setStatus(''); }} onStart={setBattleRoom} onStatus={setStatus} />
+        weaponIds={battleWeapons} onBack={() => { setPracticeRoom(false); setGameModeLobby(true); setStatus(''); }} onStart={setBattleRoom} onStatus={setStatus} />
         : gameModeLobby ? <GameModeLobby assets={assets} onPractice={() => { setPracticeRoom(true); setStatus(''); }} onStatus={setStatus} /> : <>
       <nav className="lobby-main-tabs" aria-label="角色页面">
         {['背包', '技能', '宠物'].map((label, index) => <button key={label} className={'lobby-art-button' + (index === 0 ? ' active' : '')}
@@ -307,10 +309,15 @@ export default function Lobby({ character, onExit }: { character: SavedCharacter
       </>}
       <div className="lobby-status" role="status">{status}</div>
       <nav className="lobby-footer" aria-label="大厅工具">
-        {FOOTER.map(([key, label]) => <button key={key} aria-label={label} onClick={() => key === 'setup' ? setDialog({ title: '设置' }) : moduleDialog(label)}>
+        {FOOTER.map(([key, label]) => <button key={key} aria-label={label} onClick={() => {
+          if (key === 'setup') setDialog({ title: '设置' });
+          else if (key === 'chat') setGlobalChatOpen(true);
+          else moduleDialog(label);
+        }}>
           <img src={lobbyUrl(assets.ui[`footer-${key}`])} alt="" />
         </button>)}
       </nav>
+      {globalChatOpen && <GlobalChat hostName={character.name} onClose={() => setGlobalChatOpen(false)} />}
       {dialog && <div className="lobby-modal-shade">
         <section ref={dialogRef} className="lobby-modal" style={art('modal')} role="dialog" aria-modal="true" aria-labelledby="lobby-dialog-title">
           <h2 id="lobby-dialog-title">{dialog.title}</h2>
