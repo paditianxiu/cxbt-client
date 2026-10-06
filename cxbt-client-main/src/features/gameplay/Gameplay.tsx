@@ -340,7 +340,7 @@ function BattleScene({ map, character, creation, assets, weapons, active, onRead
 
       if (otherPlayers.current) {
         const renderTime = performance.now() - 100;
-        for (const [id, stateObj] of Object.entries(otherPlayers.current)) {
+        for (const [userIdStr, stateObj] of Object.entries(otherPlayers.current)) {
           const buffer = stateObj.buffer;
           if (buffer.length === 0) continue;
 
@@ -377,7 +377,7 @@ function BattleScene({ map, character, creation, assets, weapons, active, onRead
             interpYaw = state0.yaw + dy * clampedT;
           }
 
-          let avatarObj = otherPlayerAvatars.get(id);
+          let avatarObj = otherPlayerAvatars.get(userIdStr);
           if (!avatarObj) {
             // Create a dummy group to hold the avatar and hitbox immediately
             const group = new THREE.Group();
@@ -388,14 +388,14 @@ function BattleScene({ map, character, creation, assets, weapons, active, onRead
             const capMat = new THREE.MeshBasicMaterial({ visible: false }); // Invisible hitbox
             const hitbox = new THREE.Mesh(capsuleGeom, capMat);
             hitbox.position.y = 0.8;
-            hitbox.userData = { isPlayer: true, userId: id };
+            hitbox.userData = { isPlayer: true, userId: userIdStr };
             group.add(hitbox);
             collisionMeshes.push(hitbox);
             
             avatarObj = { root: group, update: null, loaded: false };
-            otherPlayerAvatars.set(id, avatarObj);
+            otherPlayerAvatars.set(userIdStr, avatarObj);
             
-            const pInfo = roomPlayers && roomPlayers[id];
+            const pInfo = roomPlayers && roomPlayers[userIdStr];
             if (pInfo && pInfo.jobId && pInfo.appearance) {
               const job = creation.jobs[pInfo.jobId];
               if (job) {
@@ -406,7 +406,10 @@ function BattleScene({ map, character, creation, assets, weapons, active, onRead
                   group.add(loadedAvatar.root);
                   avatarObj.update = loadedAvatar.update;
                   avatarObj.loaded = true;
-                }).catch(console.error);
+                }).catch(err => {
+                  console.error('Avatar load error:', err);
+                  logDebug(`[Avatar Error] ${err.message || String(err)}`);
+                });
               }
             } else {
               // Fallback if data is missing, render red capsule
@@ -418,7 +421,7 @@ function BattleScene({ map, character, creation, assets, weapons, active, onRead
             }
           }
           
-          if (avatarObj = otherPlayerAvatars.get(id)) {
+          if (avatarObj = otherPlayerAvatars.get(userIdStr)) {
             const floor = floorAt(interpX, interpZ, 80) ?? 0;
             const oldPos = avatarObj.root.position.clone();
             avatarObj.root.position.set(interpX, floor, interpZ);
@@ -566,9 +569,14 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
   const [scoreBlue, setScoreBlue] = useState(0);
   const wsRef = useRef<WebRTCClient | null>(null);
   const sequenceRef = useRef(0);
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+  const logDebug = (msg: string) => setDebugLog(prev => [...prev.slice(-4), msg]);
+
   const myUserId = useMemo(() => {
     const me = Object.values(room.players || {}).find((p: any) => p.username === character.name);
-    return me ? (me as any).userId : 0;
+    const resolvedId = me ? (me as any).userId : 0;
+    console.log('Resolved myUserId:', resolvedId, 'for character:', character.name, 'with players:', room.players);
+    return resolvedId;
   }, [room.players, character.name]);
   const otherPlayersRef = useRef<Record<string, { buffer: {x: number, z: number, yaw: number, time: number}[] }>>({});
   const [selected, setSelected] = useState(0);
@@ -607,6 +615,7 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
     const sigUrl = `${WS_BASE.replace('/ws', '/webrtc')}?roomId=${room.id}&playerId=${myUserId}`;
     const ws = new WebRTCClient(gameUrl, sigUrl, () => {
       console.log('WebRTC Ready! Sending first sync.');
+      logDebug(`[Network] WebRTC DataChannel OPENED! 握手成功`);
       sequenceRef.current++;
       ws.sendMove(myUserId, position.x, position.z, position.yaw, sequenceRef.current);
     });
@@ -614,6 +623,10 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
 
     ws.onMessage = (msg) => {
       try {
+        if (msg.type === 'sync') {
+          // Log explicitly for debugging visibility
+          // console.log(`Received SYNC: from userId=${msg.userId}, myUserId=${myUserId}, x=${msg.x}`);
+        }
         if (msg.type === 'tick') {
           setRemaining(msg.time_left);
           setScoreRed(msg.score_red);
@@ -622,6 +635,8 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
           setHealth(msg.hp);
         } else if (msg.type === 'sync' && msg.userId != myUserId) {
           if (!otherPlayersRef.current[msg.userId]) {
+            console.log(`[Networking] First sync received for remote player userId=${msg.userId}!`);
+            logDebug(`[Network] 接收到玩家数据 (userId=${msg.userId})，开始渲染`);
             otherPlayersRef.current[msg.userId] = { buffer: [] };
           }
           const buffer = otherPlayersRef.current[msg.userId].buffer;
@@ -734,6 +749,10 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
     <div className="battle-top">
       <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', marginTop: '60px', background: 'rgba(0,0,0,0.6)', color: '#fff', padding: '4px 12px', borderRadius: '12px', fontSize: '12px', zIndex: 10, pointerEvents: 'none', border: '1px solid rgba(255,255,255,0.2)' }}>
         房间号: {room.id.replace('room-', '')} | 地图: {room.mapName}
+      </div>
+      <div style={{ position: 'absolute', top: 120, left: '50%', transform: 'translateX(-50%)', background: 'rgba(255,0,0,0.7)', color: '#fff', padding: '10px', borderRadius: '8px', fontSize: '14px', zIndex: 20, pointerEvents: 'none', minWidth: '300px' }}>
+        <strong>联机诊断日志 (Debug Log):</strong><br/>
+        {debugLog.length === 0 ? "等待网络连接..." : debugLog.map((log, i) => <div key={i}>{log}</div>)}
       </div>
       <div className="battle-team red"><strong>{scoreRed}</strong></div>
       <div className="battle-time"><b>05</b><small><em>TIME</em> {formatTime(remaining)}</small><div className="battle-progress"><i /><i /></div></div>

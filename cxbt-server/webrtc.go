@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -33,7 +34,7 @@ func ServeWebRTC(c *gin.Context) {
 	defer conn.Close()
 
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
+		ICEServers: []webrtc.ICEServer{},
 	}
 
 	peerConnection, err := webrtc.NewPeerConnection(config)
@@ -43,9 +44,11 @@ func ServeWebRTC(c *gin.Context) {
 	}
 	defer peerConnection.Close()
 
+	roomID := c.Query("roomId")
+
 	// Handle DataChannel
 	peerConnection.OnDataChannel(func(d *webrtc.DataChannel) {
-		log.Printf("New DataChannel %s %d\n", d.Label(), d.ID())
+		log.Printf("New DataChannel opened for roomID=%s", roomID)
 		d.OnMessage(func(msg webrtc.DataChannelMessage) {
 			if msg.IsString || len(msg.Data) == 0 { return }
 			
@@ -62,13 +65,13 @@ func ServeWebRTC(c *gin.Context) {
 					"z":      z,
 					"yaw":    yaw,
 				}
-				roomID := c.Query("roomId")
 				
 				if j, err := json.Marshal(syncMsg); err == nil {
 					channel := "global_channel"
 					if roomID != "" {
 						channel = "room_channel:" + roomID
 					}
+					log.Printf("WebRTC DataChannel MSG: From userID=%d, Broadcasting to channel=%s, x=%.2f z=%.2f", userID, channel, x, z)
 					if RDB != nil {
 						RDB.Publish(Ctx, channel, j)
 					}
@@ -77,10 +80,14 @@ func ServeWebRTC(c *gin.Context) {
 		})
 	})
 
+	var writeMutex sync.Mutex
+
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil { return }
 		cJson := candidate.ToJSON()
+		writeMutex.Lock()
 		conn.WriteJSON(SignalingMessage{Type: "candidate", Candidate: &cJson})
+		writeMutex.Unlock()
 	})
 
 	for {
@@ -91,7 +98,9 @@ func ServeWebRTC(c *gin.Context) {
 			peerConnection.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: sigMsg.SDP})
 			answer, _ := peerConnection.CreateAnswer(nil)
 			peerConnection.SetLocalDescription(answer)
+			writeMutex.Lock()
 			conn.WriteJSON(SignalingMessage{Type: "answer", SDP: answer.SDP})
+			writeMutex.Unlock()
 		} else if sigMsg.Type == "candidate" && sigMsg.Candidate != nil {
 			peerConnection.AddICECandidate(*sigMsg.Candidate)
 		}
