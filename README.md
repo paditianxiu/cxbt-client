@@ -7,7 +7,7 @@ npm run dev
 
 从 `/` 的职业选择页点击「开始创建」，完成后自动进入 `/lobby` 大厅。也可以直接访问 `/create-character?job=assassin`。支持 `guardian`、`gunner`、`assassin`、`biochemist` 四个职业，以及各自的男女模型；刷新大厅会恢复本地保存的角色。
 
-![角色创建](docs/character-creation.png)
+![角色创建](cxbt-client-main/docs/character-creation.png)
 
 ## 角色创建
 
@@ -21,7 +21,7 @@ npm run dev
 
 ## 大厅与背包
 
-![大厅背包](docs/lobby.png)
+![大厅背包](cxbt-client-main/docs/lobby.png)
 
 大厅依据 `scripts/lobby/lobbyMain.lua`、`personalInfo.lua` 和 `scripts/sys/skinF.lua` 布局，复用原始大厅边框、顶部导航、物品图标、背包面板和快捷栏素材。左侧及顶部头像显示创建时保存的角色。
 
