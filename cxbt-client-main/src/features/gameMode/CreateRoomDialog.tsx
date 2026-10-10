@@ -11,6 +11,7 @@ type CreateRoomDialogProps = {
 };
 
 export type RoomConfig = {
+  id?: string;
   name: string;
   password: string;
   maxPlayers: number;
@@ -19,6 +20,7 @@ export type RoomConfig = {
   modeName: string;
   mapId: string;
   mapName: string;
+  players?: Record<string, any>;
 };
 
 type Mode = {

@@ -19,6 +19,18 @@ export class PlayerEntity {
   private jumpVelocity: number = 0;
   private isJumping: boolean = false;
 
+  // 战术动作状态
+  private isRolling: boolean = false;
+  private rollTimer: number = 0;
+  private rollDuration: number = 0.8;
+
+  private isAttacking: boolean = false;
+  private attackTimer: number = 0;
+  private attackDuration: number = 0.6;
+
+  // 强制动作模式（用于沙盒动作选项独立测试）
+  private forcedAction: string | null = null;
+
   // 控制指令缓存
   private targetDirection = new THREE.Vector3();
   private targetCameraYaw: number = 0;
@@ -56,7 +68,7 @@ export class PlayerEntity {
       // 提取主骨架的骨骼映射 (名称 -> 索引)
       const boneIndices = new Map<string, number>();
       if (mainSkeleton) {
-        mainSkeleton.bones.forEach((bone, index) => {
+        mainSkeleton.bones.forEach((bone: any, index: number) => {
           boneIndices.set(bone.name, index);
         });
       }
@@ -121,15 +133,22 @@ export class PlayerEntity {
     };
 
     try {
+      if (this.mixer) {
+        this.mixer.stopAllAction();
+      }
+      this.actions = {};
+
       for (const [actionName, path] of Object.entries(animMap)) {
+        if (!path) continue;
         const clip = await fetchClip(path, actionName);
         this.actions[actionName] = this.mixer.clipAction(clip);
       }
       
-      // 加载完毕后，默认播放待机动作
-      if (this.actions['idle']) {
-        this.actions['idle'].play();
-        this.currentActionName = 'idle';
+      // 加载完毕后，应用默认或强制动作
+      if (this.forcedAction && this.actions[this.forcedAction]) {
+        this.playAction(this.forcedAction, 0.2, true);
+      } else if (this.actions['idle']) {
+        this.playAction('idle', 0.2, true);
       }
     } catch (err) {
       console.error('[PlayerEntity] Animation Loading Error:', err);
@@ -137,56 +156,169 @@ export class PlayerEntity {
   }
 
   // =========================================
-  // 3. 控制指令接收 (Controller Input)
+  // 3. 动作播放控制 (Action Control)
   // =========================================
+  public playAction(actionName: string, duration: number = 0.2, loop: boolean = true) {
+    if (!this.actions[actionName]) return;
+    const prev = this.actions[this.currentActionName];
+    const next = this.actions[actionName];
+
+    if (this.currentActionName === actionName && next.isRunning()) return;
+
+    next.reset();
+    if (!loop) {
+      next.setLoop(THREE.LoopOnce, 1);
+      next.clampWhenFinished = true;
+    } else {
+      next.setLoop(THREE.LoopRepeat, Infinity);
+      next.clampWhenFinished = false;
+    }
+    next.play();
+
+    if (prev && prev !== next) {
+      next.crossFadeFrom(prev, duration, true);
+    }
+    this.currentActionName = actionName;
+  }
+
   /**
-   * 外部仅能通过此接口干预玩家意图，隔离实现细节
-   * @param direction - 基于键盘输入的原始 XYZ 移动趋势
-   * @param cameraYaw - 当前相机的偏航角，用于计算真正的世界移动方向
-   * @param jumpCmd - 是否触发起跳指令
+   * 触发翻滚动作
    */
+  public roll(): boolean {
+    if (this.isRolling || this.isJumping || !this.actions['roll']) return false;
+    this.isRolling = true;
+    const clipDuration = this.actions['roll'].getClip()?.duration;
+    this.rollDuration = clipDuration ? Math.min(clipDuration, 1.0) : 0.8;
+    this.rollTimer = this.rollDuration;
+    this.playAction('roll', 0.15, false);
+    return true;
+  }
+
+  /**
+   * 触发近战攻击或射击动作
+   */
+  public attack(): boolean {
+    if (this.isAttacking || this.isRolling || !this.actions['attack']) return false;
+    this.isAttacking = true;
+    const clipDuration = this.actions['attack'].getClip()?.duration;
+    this.attackDuration = clipDuration ? Math.min(clipDuration, 1.2) : 0.6;
+    this.attackTimer = this.attackDuration;
+    this.playAction('attack', 0.1, false);
+    return true;
+  }
+
+  /**
+   * 触发起跳
+   */
+  public jump(): boolean {
+    if (this.isJumping || this.isRolling) return false;
+    this.isJumping = true;
+    this.jumpVelocity = 6.0;
+    return true;
+  }
+
+  /**
+   * 强制播放指定动作（用于动作调试面板）
+   * @param actionName null 表示恢复自动状态机
+   */
+  public setForcedAction(actionName: string | null) {
+    this.forcedAction = actionName;
+    if (actionName && this.actions[actionName]) {
+      this.playAction(actionName, 0.2, true);
+    } else if (!actionName) {
+      // 恢复状态机时重置当前动作标记以便平滑切回
+      this.currentActionName = '';
+      if (this.actions['idle']) {
+        this.playAction('idle', 0.2, true);
+      }
+    }
+  }
+
+  public getCurrentAction(): string {
+    return this.currentActionName;
+  }
+
+  public getLoadedActions(): string[] {
+    return Object.keys(this.actions);
+  }
+
+  // =========================================
+  // 4. 控制指令接收 (Controller Input)
+  // =========================================
   public setInput(direction: any, cameraYaw: number, jumpCmd: boolean) {
     this.targetDirection.copy(direction);
     this.targetCameraYaw = cameraYaw;
     this.isMoving = direction.lengthSq() > 0.01;
 
     // 仅在非起跳状态下允许跳跃
-    if (jumpCmd && !this.isJumping) {
-      this.isJumping = true;
-      this.jumpVelocity = 6.0;
+    if (jumpCmd && !this.isJumping && !this.isRolling) {
+      this.jump();
     }
   }
 
   // =========================================
-  // 4. 物理引擎与帧刷新 (Engine Loop)
+  // 5. 物理引擎与帧刷新 (Engine Loop)
   // =========================================
   public update(delta: number) {
     if (!this.isReady) return;
 
-    // 1. 动画状态机决策
+    // 1. 如果处于强制动作调试模式
+    if (this.forcedAction && this.actions[this.forcedAction]) {
+      if (this.currentActionName !== this.forcedAction) {
+        this.playAction(this.forcedAction, 0.2, true);
+      }
+      if (this.mixer) {
+        this.mixer.update(delta);
+      }
+      return;
+    }
+
+    // 2. 状态机计时更新
+    if (this.isRolling) {
+      this.rollTimer -= delta;
+      if (this.rollTimer <= 0) {
+        this.isRolling = false;
+      }
+    }
+
+    if (this.isAttacking) {
+      this.attackTimer -= delta;
+      if (this.attackTimer <= 0) {
+        this.isAttacking = false;
+      }
+    }
+
+    // 3. 动画状态机决策
     let nextAction = 'idle';
-    if (this.isJumping) {
+    if (this.isRolling && this.actions['roll']) {
+      nextAction = 'roll';
+    } else if (this.isAttacking && this.actions['attack']) {
+      nextAction = 'attack';
+    } else if (this.isJumping && this.actions['jump']) {
       nextAction = 'jump';
-    } else if (this.isMoving) {
+    } else if (this.isMoving && this.actions['run']) {
       nextAction = 'run';
     }
 
     // 状态切换 (执行动画的 CrossFade 平滑过渡)
-    if (this.currentActionName !== nextAction && this.actions[nextAction] && this.actions[this.currentActionName]) {
-      const prev = this.actions[this.currentActionName];
-      const next = this.actions[nextAction];
-      next.reset().play();
-      next.crossFadeFrom(prev, 0.2, true);
-      this.currentActionName = nextAction;
+    if (this.currentActionName !== nextAction && this.actions[nextAction]) {
+      const isOneShot = nextAction === 'roll' || nextAction === 'attack';
+      this.playAction(nextAction, 0.15, !isOneShot);
     }
 
-    // 2. 更新动作时间轴
+    // 4. 更新动作时间轴
     if (this.mixer) {
       this.mixer.update(delta);
     }
 
-    // 3. 转身与平移物理
-    if (this.isMoving) {
+    // 5. 转身与平移物理
+    if (this.isRolling) {
+      const rollSpeed = 8.5;
+      const moveX = Math.sin(this.modelGroup.rotation.y) * rollSpeed * delta;
+      const moveZ = Math.cos(this.modelGroup.rotation.y) * rollSpeed * delta;
+      this.modelGroup.position.x += moveX;
+      this.modelGroup.position.z += moveZ;
+    } else if (this.isMoving && !this.isAttacking) {
       const angle = Math.atan2(this.targetDirection.x, this.targetDirection.z);
       const targetRotation = this.targetCameraYaw + angle;
       
@@ -202,7 +334,7 @@ export class PlayerEntity {
       this.modelGroup.position.z += moveZ;
     }
 
-    // 4. 简单重力物理计算
+    // 6. 简单重力物理计算
     if (this.isJumping) {
       this.modelGroup.position.y += this.jumpVelocity * delta;
       this.jumpVelocity += this.gravity * delta;

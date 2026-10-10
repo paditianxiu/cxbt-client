@@ -44,7 +44,7 @@ function formatTime(seconds: number) {
 }
 
 function BattleScene({ map, character, creation, assets, weapons, active, onReady, onPosition,
-  onShot, onHit, onReload, onWeaponChange, onDamage, paused, otherPlayers, roomPlayers }: {
+  onShot, onHit, onReload, onWeaponChange, onDamage, paused, otherPlayers, roomPlayers, logDebug }: {
   map: MapDefinition;
   character: SavedCharacter;
   creation: CreationAssets;
@@ -61,6 +61,7 @@ function BattleScene({ map, character, creation, assets, weapons, active, onRead
   onDamage: (amount: number) => void;
   otherPlayers: React.RefObject<Record<string, { buffer: {x: number, z: number, yaw: number, time: number}[] }>>;
   roomPlayers: any;
+  logDebug: (msg: string) => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const shotRef = useRef(onShot);
@@ -180,7 +181,7 @@ function BattleScene({ map, character, creation, assets, weapons, active, onRead
         const hits = raycaster.intersectObjects(collisionMeshes, true);
         const firstHit = hits.find((h: any) => h.distance > 0.08);
         if (firstHit && firstHit.object.userData?.isPlayer) {
-          const damage = kind === 'sniperrifle' ? 85 : kind === 'shotgun' ? 35 : 18;
+          const damage = family === 'sniperrifle' ? 85 : family === 'shotgun' ? 35 : 18;
           hitRef.current(firstHit.object.userData.userId, damage);
         }
       }
@@ -553,7 +554,7 @@ function BattleScene({ map, character, creation, assets, weapons, active, onRead
 }
 
 export default function Gameplay({ room, character, creation, assets, weaponIds, onExit }: {
-  room: RoomConfig;
+  room: RoomConfig & { id: string; players?: Record<string, any> };
   character: SavedCharacter;
   creation: CreationAssets;
   assets: LobbyAssets;
@@ -732,6 +733,7 @@ export default function Gameplay({ room, character, creation, assets, weaponIds,
       active={control} paused={pausedRef} onReady={() => setReady(true)} onPosition={reportPosition}
       otherPlayers={otherPlayersRef}
       roomPlayers={room.players}
+      logDebug={logDebug}
       onShot={onShot} 
       onHit={(targetId, damage) => {
         if (wsRef.current) {
