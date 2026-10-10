@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Test</title>
+</head>
+<body>
+  <h1>WebRTC DataChannel Test</h1>
+  <div id="status">Connecting...</div>
+  <button id="sendBtn" disabled>Send Binary Move Data</button>
+  <pre id="log"></pre>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const sendBtn = document.getElementById('sendBtn');
+    
+    function log(msg) {
+      console.log(msg);
+      logEl.innerText += msg + '\n';
+    }
+
+    const ws = new WebSocket('ws://localhost:8080/webrtc');
+    const peer = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+
+    const dataChannel = peer.createDataChannel('game', {
+      ordered: false,
+      maxRetransmits: 0 
+    });
+    dataChannel.binaryType = 'arraybuffer';
+
+    dataChannel.onopen = () => {
+      statusEl.innerText = 'Connected!';
+      sendBtn.disabled = false;
+      log('DataChannel opened');
+    };
+
+    dataChannel.onmessage = (e) => {
+      log('Received from server (binary length): ' + e.data.byteLength);
+    };
+
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'answer') {
+        log('Received answer');
+        await peer.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      } else if (msg.type === 'candidate') {
+        await peer.addIceCandidate(msg.candidate);
+      }
+    };
+
+    peer.onicecandidate = (e) => {
+      if (e.candidate) {
+        ws.send(JSON.stringify({ type: 'candidate', candidate: e.candidate }));
+      }
+    };
+
+    ws.onopen = async () => {
+      log('WebSocket signaled connected. Creating offer...');
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+    };
+
+    let seq = 0;
+    sendBtn.onclick = () => {
+      seq++;
+      const buffer = new ArrayBuffer(17);
+      const view = new DataView(buffer);
+      view.setUint8(0, 1);
+      view.setFloat32(1, 10.5, true);
+      view.setFloat32(5, 0.0, true);
+      view.setFloat32(9, -5.5, true);
+      view.setUint32(13, seq, true);
+      
+      dataChannel.send(buffer);
+      log(`Sent binary move data (Seq: ${seq})`);
+    };
+  </script>
+</body>
+</html>

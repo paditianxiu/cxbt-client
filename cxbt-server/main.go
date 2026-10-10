@@ -24,7 +24,7 @@ func CORSMiddleware() gin.HandlerFunc {
 }
 
 func main() {
-	log.Println("Starting cxbt-server on port 8080...")
+	log.Println("Starting cxbt-server on port 8081...")
 
 	// Initialize Database (SQLite & Redis)
 	InitDB()
@@ -40,7 +40,7 @@ func main() {
 	r.GET("/ws", ServeWs)
 	r.GET("/webrtc", ServeWebRTC)
 
-	if err := r.Run(":8080"); err != nil {
+	if err := r.Run(":8081"); err != nil {
 		log.Fatalf("Failed to run server: %v", err)
 	}
 }
